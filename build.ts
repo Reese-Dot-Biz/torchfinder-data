@@ -13,7 +13,14 @@
 
 import { parse as parseYaml } from "@std/yaml";
 import Ajv from "ajv";
-import { checkSmartChars, type Entry, type EnrichedEntry, enrichEntries } from "./scripts/lib.ts";
+import {
+  ADDED_DATES_GIT_ARGS,
+  checkSmartChars,
+  type Entry,
+  type EnrichedEntry,
+  enrichEntries,
+  parseAddedDates,
+} from "./scripts/lib.ts";
 
 // Load schema and taxonomies
 /////////////////////////////
@@ -197,7 +204,25 @@ if (hasErrors) {
 // Compute derived fields
 /////////////////////////
 
-const enriched: EnrichedEntry[] = enrichEntries(entries);
+const canWrite = (await Deno.permissions.query({ name: "write", path: "dist" })).state === "granted";
+
+let addedDates = new Map<string, string>();
+if (canWrite) {
+  try {
+    const { success, stdout } = await new Deno.Command("git", {
+      args: ADDED_DATES_GIT_ARGS,
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+
+    if (success) addedDates = parseAddedDates(new TextDecoder().decode(stdout));
+    else console.warn("git log failed; entries will have no added date");
+  } catch (e) {
+    console.warn(`Could not read added dates from git: ${e}`);
+  }
+}
+
+const enriched: EnrichedEntry[] = enrichEntries(entries, addedDates);
 
 // Write output
 ///////////////
@@ -206,8 +231,6 @@ enriched.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity:
 
 const n = enriched.length;
 const noun = n === 1 ? "entry" : "entries";
-
-const canWrite = (await Deno.permissions.query({ name: "write", path: "dist" })).state === "granted";
 
 if (canWrite) {
   await Deno.mkdir("dist", { recursive: true });

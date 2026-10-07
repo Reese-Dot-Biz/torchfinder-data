@@ -22,6 +22,7 @@
 export function parseIssueBody(body: string): Map<string, string> {
   const result = new Map<string, string>();
   const sections = body.split(/\n(?=### )/);
+
   for (const section of sections) {
     const lines = section.split("\n");
     const headerLine = lines[0].trim();
@@ -30,6 +31,7 @@ export function parseIssueBody(body: string): Map<string, string> {
     const valueLines = lines.slice(1).join("\n").trim();
     result.set(key, valueLines);
   }
+
   return result;
 }
 
@@ -72,27 +74,44 @@ export function parseLinks(
 
   for (const line of parseLines(raw)) {
     const parts = line.split("|").map((p) => p.trim());
+
     if (parts.length !== 5) {
-      errors.push(`Invalid link format (expected 5 pipe-separated fields: title | url | language | type | pricing): "${line}"`);
+      errors.push(
+        `Invalid link format (expected 5 pipe-separated fields: title | url | language | type | pricing): "${line}"`,
+      );
+
       continue;
     }
+
     const [title, url, language, type, pricing] = parts;
     let lineErrors = false;
+
     if (!url.startsWith("https://")) {
       errors.push(`Link URL must start with https://: "${url}"`);
       lineErrors = true;
     }
+
     if (!language || !/^[a-z]{2,3}(-[A-Za-z]{2,4})?$/.test(language)) {
       errors.push(`Invalid language tag "${language}" in link: "${line}"`);
       lineErrors = true;
     }
+
     if (lineErrors) continue;
+
     if (!knownTypes.includes(type)) {
-      console.warn(`Unknown link type "${type}". Known values: ${knownTypes.join(", ")}`);
+      console.warn(
+        `Unknown link type "${type}". Known values: ${knownTypes.join(", ")}`,
+      );
     }
+
     if (!knownPricings.includes(pricing)) {
-      console.warn(`Unknown link pricing "${pricing}". Known values: ${knownPricings.join(", ")}`);
+      console.warn(
+        `Unknown link pricing "${pricing}". Known values: ${
+          knownPricings.join(", ")
+        }`,
+      );
     }
+
     links.push({ title, url, language, type, pricing });
   }
 
@@ -112,7 +131,9 @@ export function yamlLinks(links: ParsedLink[]): string {
   return links
     .map(
       (l) =>
-        `  - title: ${yamlScalar(l.title)}\n    url: ${yamlScalar(l.url)}\n    language: ${l.language}\n    type: ${l.type}\n    pricing: ${l.pricing}`,
+        `  - title: ${yamlScalar(l.title)}\n    url: ${
+          yamlScalar(l.url)
+        }\n    language: ${l.language}\n    type: ${l.type}\n    pricing: ${l.pricing}`,
     )
     .join("\n");
 }
@@ -121,10 +142,10 @@ export function yamlLinks(links: ParsedLink[]): string {
 export function titleToId(title: string): string {
   return title
     .toLowerCase()
-    .normalize("NFD")                        // decompose accented chars
-    .replace(/[\u0300-\u036f]/g, "")         // strip combining diacritics
-    .replace(/[^a-z0-9]+/g, "-")            // non-alphanumeric runs → hyphen
-    .replace(/^-+|-+$/g, "");               // trim leading/trailing hyphens
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 export const YAML_RESERVED =
@@ -177,6 +198,7 @@ export interface EnrichedEntry extends Entry {
   languages: string[];
   pricings: string[];
   children?: string[];
+  added?: string;
 }
 
 // Enrichment
@@ -187,8 +209,12 @@ export interface EnrichedEntry extends Entry {
  *   - languages: unique, sorted language codes from links
  *   - pricings: unique, sorted pricing values from links
  *   - children: IDs of entries that reference this entry via included_in
+ *   - added: date the entry's file was first committed, when addedDates has it
  */
-export function enrichEntries(entries: Entry[]): EnrichedEntry[] {
+export function enrichEntries(
+  entries: Entry[],
+  addedDates: Map<string, string> = new Map(),
+): EnrichedEntry[] {
   const childrenMap = new Map<string, string[]>();
   for (const entry of entries) {
     for (const parentId of entry.included_in ?? []) {
@@ -198,13 +224,51 @@ export function enrichEntries(entries: Entry[]): EnrichedEntry[] {
   }
   return entries.map((entry) => {
     const children = childrenMap.get(entry.id) ?? [];
+    const added = addedDates.get(entry.id);
     return {
       ...entry,
-      languages: [...new Set((entry.links ?? []).map((l) => l.language))].sort(),
+      languages: [...new Set((entry.links ?? []).map((l) => l.language))]
+        .sort(),
       pricings: [...new Set((entry.links ?? []).map((l) => l.pricing))].sort(),
       ...(children.length > 0 ? { children } : {}),
+      ...(added ? { added } : {}),
     };
   });
+}
+
+// Added dates
+//////////////
+
+/** Arguments for the git log whose output parseAddedDates reads. */
+export const ADDED_DATES_GIT_ARGS = [
+  "log",
+  "--no-renames", // A renamed file is a new id, so it counts as newly added
+  "--diff-filter=A",
+  "--format=@%cs",
+  "--name-only",
+  "--",
+  "data/",
+];
+
+/**
+ * Maps each data/ file stem to the YYYY-MM-DD commit date of the earliest
+ * commit that added it. Log output is newest first, so later lines overwrite.
+ */
+export function parseAddedDates(log: string): Map<string, string> {
+  const dates = new Map<string, string>();
+  let current: string | null = null;
+
+  for (const line of log.split("\n")) {
+    if (line.startsWith("@")) {
+      current = line.slice(1).trim();
+      continue;
+    }
+
+    const match = line.trim().match(/^data\/([^/]+)\.yaml$/);
+    if (match && current) dates.set(match[1], current);
+  }
+
+  return dates;
 }
 
 // EntryFields (used for generating new YAML)
@@ -236,6 +300,7 @@ export interface EntryFields {
 
 export function generateEntryYaml(f: EntryFields): string {
   const lines: string[] = [];
+
   lines.push(`id: ${f.id}`);
   lines.push(`title: ${yamlScalar(f.title)}`);
   lines.push(`authors:`);
@@ -246,39 +311,51 @@ export function generateEntryYaml(f: EntryFields): string {
   lines.push(yamlList(f.systems, "  "));
   lines.push(`settings:`);
   lines.push(yamlList(f.settings, "  "));
+
   if (f.official === true) lines.push(`official: true`);
+
   if (f.envs && f.envs.length > 0) {
     lines.push(`envs:`);
     lines.push(yamlList(f.envs, "  "));
   }
+
   if (f.themes && f.themes.length > 0) {
     lines.push(`themes:`);
     lines.push(yamlList(f.themes, "  "));
   }
+
   if (f.character_options && f.character_options.length > 0) {
     lines.push(`character_options:`);
     lines.push(yamlList(f.character_options.map(yamlScalar), "  "));
   }
+
   if (f.lmin !== undefined) lines.push(`lmin: ${f.lmin}`);
   if (f.lmax !== undefined) lines.push(`lmax: ${f.lmax}`);
   if (f.pmin !== undefined) lines.push(`pmin: ${f.pmin}`);
   if (f.pmax !== undefined) lines.push(`pmax: ${f.pmax}`);
+
   if (f.desc) {
     lines.push(`desc: >`);
     lines.push(`  ${f.desc}`);
   }
+
   if (f.pages !== undefined) lines.push(`pages: ${f.pages}`);
   if (f.cover) lines.push(`cover: ${yamlScalar(f.cover)}`);
+
   if (f.links.length > 0) {
     lines.push(`links:`);
     lines.push(yamlLinks(f.links));
   }
+
   if (f.pub) lines.push(`pub: ${yamlScalar(f.pub)}`);
+
   if (f.included_in && f.included_in.length > 0) {
     lines.push(`included_in:`);
     lines.push(yamlList(f.included_in, "  "));
   }
+
   lines.push(`date: "${f.date}"`);
+
   return lines.join("\n") + "\n";
 }
 
@@ -305,7 +382,9 @@ export function checkSmartChars(value: unknown, path = ""): string[] {
   if (typeof value === "string") {
     for (const [char, label] of SMART_CHARS) {
       if (value.includes(char)) {
-        errors.push(`${path} contains ${label}. Replace with its ASCII equivalent`);
+        errors.push(
+          `${path} contains ${label}. Replace with its ASCII equivalent`,
+        );
       }
     }
   } else if (Array.isArray(value)) {

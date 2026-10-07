@@ -19,6 +19,7 @@ import {
   enrichEntries,
   generateEntryYaml,
   isUnchanged,
+  parseAddedDates,
   parseIssueBody,
   parseLines,
   parseLinks,
@@ -573,6 +574,48 @@ Deno.test("enrichEntries: child entry does not get children field", () => {
   const results = enrichEntries([parent, child]);
   const childResult = results.find((e) => e.id === "child")!;
   assertEquals("children" in childResult, false);
+});
+
+Deno.test("enrichEntries: added date is copied when known", () => {
+  const entry = { ...BASE_ENTRY, id: "dated" };
+  const [result] = enrichEntries([entry], new Map([["dated", "2026-04-12"]]));
+  assertEquals(result.added, "2026-04-12");
+});
+
+Deno.test("enrichEntries: added field is omitted when unknown", () => {
+  const [result] = enrichEntries([{ ...BASE_ENTRY, id: "undated" }]);
+  assertEquals("added" in result, false);
+});
+
+// parseAddedDates
+//////////////////
+
+Deno.test("parseAddedDates: maps file stems to commit dates", () => {
+  const log = "@2026-04-14\n\ndata/b.yaml\n@2026-03-20\n\ndata/a.yaml\n";
+  const dates = parseAddedDates(log);
+  assertEquals(dates.get("a"), "2026-03-20");
+  assertEquals(dates.get("b"), "2026-04-14");
+});
+
+Deno.test("parseAddedDates: earliest add wins for a re-added file", () => {
+  const log = "@2026-05-01\n\ndata/a.yaml\n@2026-03-20\n\ndata/a.yaml\n";
+  assertEquals(parseAddedDates(log).get("a"), "2026-03-20");
+});
+
+Deno.test("parseAddedDates: several files in one commit share its date", () => {
+  const log = "@2026-04-06\n\ndata/a.yaml\ndata/b.yaml\n";
+  const dates = parseAddedDates(log);
+  assertEquals(dates.get("a"), "2026-04-06");
+  assertEquals(dates.get("b"), "2026-04-06");
+});
+
+Deno.test("parseAddedDates: ignores non-YAML and nested paths", () => {
+  const log = "@2026-04-06\n\ndata/README.md\ndata/sub/c.yaml\n";
+  assertEquals(parseAddedDates(log).size, 0);
+});
+
+Deno.test("parseAddedDates: empty log yields no dates", () => {
+  assertEquals(parseAddedDates("").size, 0);
 });
 
 // compareSchemas
